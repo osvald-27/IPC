@@ -1,4 +1,3 @@
-/*Copied from the Linux Implementation as bo changes were required*/
 #ifndef TYPES_H
 #define TYPES_H
 
