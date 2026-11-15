@@ -1,71 +1,155 @@
-
-#ifndef TYPES_H
-#define TYPES_H
+#ifndef PROTOCOL_H
+#define PROTOCOL_H
 
 #include <stdint.h>
-#include <stddef.h>
 
-/* Protocol and system limits */
-#define CLIENT_ID_LENGTH       7U
-#define MAX_CLIENTS            1000U
-#define MAX_TRANSACTION_ID     36U
-#define MAX_REQUEST_ID         36U
-#define MAX_SESSION_ID         36U
+#include "types.h"
+#include "status.h"
+#include "transaction.h"
 
-#define CURRENCY_CODE_LENGTH   3U
-#define CURRENCY_CODE          "XAF"
-
-/* In my first design I though of making
- *the type for money to be float but AI disagreed
+/* Number ("CRIP" in ASCII) lets the server quickly reject
+ * corrupted or unrelated bytes from the message queue
+ * before parsing the rest of the packet.
  */
-/* I use a signed interger here to allow the possibility to  
- * account for possible debt mechanisms, 64 bits also allows
- * for more money in magnitued of the amount, both keeping
- * precision in storage of small number and storing large ones
- * money_t makes it more niche to the concept of finances as
- * compared to int64_t
- */
-typedef int64_t money_t;
+#define PROTOCOL_NUMBER 0x43524950U
+#define PROTOCOL_VERSION        1U
 
-/* It is easier to assign one client_id directly to another 
- * using =(id1 = id1) this is better than char* as there way less
- * overhead trying to dereference, this also guarantees fixed size
- * It also avoids the ambiguity of working with a pointer
- * the 1U is an unsigned integer for the null character adding
- * adding just 1 would be mixing signed and unsigned intergers
- */
-typedef struct {
-    char value[CLIENT_ID_LENGTH + 1U];
-} client_id_t;
-
-typedef struct {
-    char value[MAX_TRANSACTION_ID + 1U];
-} transaction_id_t;
-
-typedef struct {
-    char value[MAX_REQUEST_ID + 1U];
-} request_id_t;
-
-typedef struct {
-    char value[MAX_SESSION_ID + 1U];
-} session_id_t;
+#define MAX_PAYLOAD_SIZE        4096U
+#define MAX_MESSAGE_SIZE        8192U
 
 /*
- * Account state is more controlled on the server in
- * in shared memory. Clients modify these through safe 
- * structures.
+ * Operation codes should be spaced by tens (10s for queries, 20s for
+ * money movements, etc.) so new commands can be added later
+ * without shifting existing numbers.
+ */
+typedef enum {
+    REQUEST_NONE               = 0,
+
+    REQUEST_INITIALIZE         = 1,
+    REQUEST_LOGIN              = 2,
+    REQUEST_LOGOUT             = 3
+#define PROTOCOL_H
+
+#include <stdint.h>
+
+#include "types.h"
+#include "status.h"
+#include "transaction.h"
+
+/* Number ("CRIP" in ASCII) lets the server quickly reject
+ * corrupted or unrelated bytes from the message queue
+ * before parsing the rest of the packet.
+ */
+#define PROTOCOL_NUMBER	0x43524950U
+#define PROTOCOL_VERSION        1U
+
+#define MAX_PAYLOAD_SIZE        4096U
+#define MAX_MESSAGE_SIZE        8192U
+
+/*
+ * Operation codes should be spaced by tens (10s for queries, 20s for
+ * money movements, etc.) so new commands can be added later
+ * without shifting existing numbers.
+ */
+typedef enum {
+    REQUEST_NONE               = 0,
+
+    REQUEST_INITIALIZE         = 1,
+    REQUEST_LOGIN              = 2,
+    REQUEST_LOGOUT             = 3,
+
+    REQUEST_GET_BALANCE        = 10,
+
+    REQUEST_DEPOSIT            = 20,
+    REQUEST_WITHDRAWAL         = 21,
+    REQUEST_TRANSFER           = 22,
+
+    REQUEST_TRANSACTION_STATUS = 30,
+
+    REQUEST_SERVER_STATUS      = 40,
+
+    RESPONSE_MESSAGE           = 100
+} message_type_t;
+
+/*
+ * Every request and response begins with this fixed header so the
+ * receiver knows how many payload bytes to read next and which
+ * session or request the message belongs to, abit complex but helps
+ * helps with long term functionality.
+ */
+typedef struct {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t header_size;
+
+    uint32_t message_type;
+    uint32_t payload_size;
+
+    request_id_t request_id;
+    session_id_t session_id;
+} message_header_t;
+
+/*
+ * Login payload carries only the client ID. Passwords or PINs stay
+ * out of standard transaction packets and go through a dedicated
+ * authentication exchange instead.
  */
 typedef struct {
     client_id_t client_id;
+} login_request_t;
+
+/*
+ * A transactional request arries the core terms needed to execute 
+ * a deposit, withdrawal, or transfer. For deposits and withdrawals,
+ * receiver_id can be left empty or matched to sender_id.
+ */
+typedef struct {
+    transaction_type_t type;
+
+    client_id_t sender_id;
+    client_id_t receiver_id;
+
+    money_t amount;
+} transaction_request_t;
+
+/*
+ * Balance query payload.
+ */
+typedef struct {
+    client_id_t client_id;
+} balance_request_t;
+
+/*
+ * Returns the live balance alongside account_version so the client
+ * can tell if another operation updated the account in the meantime.
+ */
+typedef struct {
+    client_id_t client_id;
+    money_t balance;
+    uint64_t account_version;
+} balance_response_t;
+
+/*
+ * Generic response header sent back when an operation only needs
+ * to report success or an error code (such as logout or errors).
+ */
+typedef struct {
+    status_t status;
+    uint32_t payload_size;
+} response_t;
+
+/*
+ * Sent back after a deposit, withdrawal, or transfer so the client
+ * gets the generated transaction ID, current state, and new balance
+ * in a single round trip.
+ */
+typedef struct {
+    transaction_id_t transaction_id;
+
+    transaction_state_t state;
+    status_t status;
 
     money_t balance;
-    money_t total_deposits;
-    money_t total_withdrawals;
+} transaction_response_t;
 
-    uint64_t version;
-    uint32_t flags;
-    uint32_t reserved;
-} account_t;
-
-#endif /* TYPES_H */
-
+#endif /* PROTOCOL_H */
