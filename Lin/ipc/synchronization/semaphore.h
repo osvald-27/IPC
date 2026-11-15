@@ -1,18 +1,51 @@
 #ifndef SEMAPHORE_H
 #define SEMAPHORE_H
 
-#include <sys/types.h>
+#include "../common/status.h"
 
-// Crée le sémaphore, valeur de départ = 1 (libre)
-int semaphore_create(key_t key);
+/*
+ * Opaque handle for the global transaction lock.
+ * Hiding the underlying OS semaphore ID behind this pointer lets
+ * server/transaction.c call the exact same locking functions on
+ * both Linux and Windows without caring how the kernel implements it.
+ */
+typedef struct transaction_lock transaction_lock_t;
 
-// Prend le verrou : -1, si c'est occupé, on attend
-int semaphore_lock(int semid);
+/*
+ * Creates and initializes a new binary semaphore set to 1 (unlocked).
+ * Called once by the main server during startup using a key derived
+ * from key_path.
+ */
+status_t semaphore_create(const char *key_path, char proj_id, transaction_lock_t **lock);
 
-// Libère le verrou : +1
-int semaphore_unlock(int semid);
+/*
+ * Attaches to an existing semaphore created by the server so other
+ * processes can coordinate access without recreating the lock.
+ */
+status_t semaphore_open(const char *key_path, char proj_id, transaction_lock_t **lock);
 
-// Supprime le sémaphore à la fin, pour ne pas laisser de déchets
-int semaphore_remove(int semid);
+/*
+ * Acquires the transaction lock (P operation). Blocks the calling
+ * process until no other worker is modifying balances or writing logs.
+ */
+status_t semaphore_lock(transaction_lock_t *lock);
 
-#endif
+/*
+ * Releases the transaction lock (V operation) so the next waiting
+ * worker process can enter the critical section.
+ */
+status_t semaphore_unlock(transaction_lock_t *lock);
+
+/*
+ * Frees the local handle memory without deleting the semaphore from
+ * the kernel. Used by worker processes when they exit.
+ */
+void semaphore_close(transaction_lock_t *lock);
+
+/*
+ * Destroys the semaphore set in the kernel and frees the handle.
+ * Called only by the main server during shutdown.
+ */
+status_t semaphore_remove(transaction_lock_t *lock);
+
+#endif /* SEMAPHORE_H */
