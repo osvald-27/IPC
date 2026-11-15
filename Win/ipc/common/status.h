@@ -1,6 +1,17 @@
 #ifndef STATUS_H
 #define STATUS_H
 
+/*
+ * <windows.h> already has a macro called STATUS_TIMEOUT (0x102, from
+ * winnt.h). Left alone it replaces our enum name and the build fails.
+ * Include windows.h here first, then drop its macro, so the result is
+ * the same whatever order a .c file includes its headers in.
+ */
+#include <windows.h>
+#ifdef STATUS_TIMEOUT
+#undef STATUS_TIMEOUT
+#endif
+
 /* Status codes are grouped by negative ranges (-10s for auth,
  * -20s for accounts, -30s for transactions, etc.) so any return
  * value >= 0 means success while any negative value flags a
