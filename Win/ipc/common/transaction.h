@@ -1,0 +1,17 @@
+#ifndef TRANSACTION_H
+#define TRANSACTION_H
+
+typedef enum {
+    TRANSACTION_DEPOSIT = 1,
+    TRANSACTION_WITHDRAWAL,
+    TRANSACTION_TRANSFER
+} transaction_type_t;
+
+typedef enum {
+    TRANSACTION_STATE_PENDING = 0,
+    TRANSACTION_STATE_COMPLETED,
+    TRANSACTION_STATE_REJECTED,
+    TRANSACTION_STATE_FAILED
+} transaction_state_t;
+
+#endif /* TRANSACTION_H */
