@@ -7,28 +7,27 @@
 #include <string.h>
 #include <unistd.h>
 
-/* Dispatches and executes an incoming client request */
 static void handle_request(server_ctx_t *ctx, session_t *session, const Message *request, Message *response) {
     memset(response, 0, sizeof(*response));
-    response->mtype = request->sender_pid;  /* Route response to client's PID */
+    response->mtype = request->sender_pid;
     response->request_id = request->request_id;
     response->sender_pid = (int32_t)getpid();
     response->operation = request->operation;
-    strncpy(response->client_id, request->client_id, CLIENT_ID_LEN);
-    strncpy(response->session_id, session->session_id.value, SESSION_ID_LEN);
+    snprintf(response->client_id, sizeof(response->client_id), "%.*s", CLIENT_ID_LEN - 1, request->client_id);
+    snprintf(response->session_id, sizeof(response->session_id), "%.*s", SESSION_ID_LEN - 1, request->session_id);
 
     /* 1. Login Request */
     if (request->operation == MSG_LOGIN) {
         status_t st = auth_login(ctx, session, request->client_id, (pid_t)request->sender_pid);
         response->status_code = st;
         if (st == STATUS_OK) {
-            strncpy(response->session_id, session->session_id.value, SESSION_ID_LEN);
+            snprintf(response->session_id, sizeof(response->session_id), "%.*s", SESSION_ID_LEN - 1, session->session_id.value);
         }
         return;
     }
 
-    /* 2. For all subsequent requests, verify session token */
-    status_t auth_st = auth_check(session, request->client_id, request->session_id);
+    /* 2. Verify session token against shared memory across all worker processes */
+    status_t auth_st = auth_check(ctx, request->client_id, request->session_id);
     if (auth_st != STATUS_OK) {
         response->status_code = auth_st;
         return;
@@ -40,7 +39,7 @@ static void handle_request(server_ctx_t *ctx, session_t *session, const Message 
         balance_response_t bal;
         client_id_t cid;
         memset(&cid, 0, sizeof(cid));
-        strncpy(cid.value, session->client_id.value, CLIENT_ID_LENGTH);
+        snprintf(cid.value, sizeof(cid.value), "%.*s", (int)CLIENT_ID_LENGTH, request->client_id);
 
         status_t st = transaction_balance(ctx, &cid, &bal);
         response->status_code = st;
@@ -53,11 +52,6 @@ static void handle_request(server_ctx_t *ctx, session_t *session, const Message 
     case MSG_DEPOSIT:
     case MSG_WITHDRAW:
     case MSG_TRANSFER: {
-        /* Clients can only operate or initiate debit on their own authenticated account */
-        if (strncmp(request->client_id, session->client_id.value, CLIENT_ID_LENGTH) != 0) {
-            response->status_code = STATUS_PERMISSION_DENIED;
-            break;
-        }
         transaction_execute(ctx, request, response);
         break;
     }
@@ -82,7 +76,7 @@ static void handle_request(server_ctx_t *ctx, session_t *session, const Message 
     }
 
     case MSG_LOGOUT: {
-        auth_logout(session);
+        auth_logout(ctx, request->session_id);
         response->status_code = STATUS_OK;
         break;
     }
@@ -105,7 +99,6 @@ int server_msg_recv(int qid, Message *msg, long mtype) {
     return msgrcv(qid, msg, payload_size, mtype, 0) == -1 ? -1 : 0;
 }
 
-/* Worker loop: continuously retrieves and processes client requests */
 int worker_run(server_ctx_t *ctx) {
     if (ctx == NULL) {
         return 1;
@@ -118,7 +111,6 @@ int worker_run(server_ctx_t *ctx) {
     Message response;
 
     while (!ctx->stop) {
-        /* Block until a request arrives from any client on MSG_REQUEST_TYPE (1L) */
         if (server_msg_recv(ctx->msg_qid, &request, MSG_REQUEST_TYPE) != 0) {
             if (errno == EINTR || ctx->stop) {
                 break;
@@ -126,15 +118,12 @@ int worker_run(server_ctx_t *ctx) {
             continue;
         }
 
-        /* Process request */
         handle_request(ctx, &session, &request, &response);
 
-        /* Send response back to the client using its PID as the message type */
         if (response.mtype > 0) {
             server_msg_send(ctx->msg_qid, &response);
         }
     }
 
-    auth_logout(&session);
     return 0;
 }

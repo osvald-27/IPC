@@ -1,25 +1,22 @@
-# Compiles the multi-process System V IPC banking server and links the
-# synchronization module into a single standalone executable (server_app).
-
-# Use ':=' (simple expansion) so variables get evaluated once up front instead
-# of being re-expanded recursively every time a rule runs.
-CC      := gcc
-
 # Compiler flags:
-#   -std=c11       : Target modern standard C11 (works cleanly with _POSIX_C_SOURCE)
+#   -std=c11       : Target standard C11 (works cleanly alongside _POSIX_C_SOURCE)
 #   -Wall -Wextra  : Turn on strict warnings so subtle bugs get caught at compile time
 #   -Wpedantic     : Enforce strict ISO C rules so the code stays portable to Windows/MinGW
-#   -O2            : Standard optimization level without hurting debuggability
-#   -pthread       : Define _REENTRANT for thread-safe libc/errno (needed for the operator thread)
+#   -O2            : Standard optimization level without making debugging painful
+#   -pthread       : Sets _REENTRANT for thread-safe libc/errno (needed by the server's operator thread)
 CFLAGS  := -std=c11 -Wall -Wextra -Wpedantic -O2 -pthread
 
 # Linker flags:
-#   -pthread       : Link against libpthread so pthread_create/pthread_detach resolve properly
+#   -pthread       : Links libpthread into the server for pthread_create/pthread_detach.
+#                    Notice the client link rule below omits $(LDFLAGS) because the client
+#                    is single-threaded and doesn't need pthreads linked in.
 LDFLAGS := -pthread
 
-# Explicit list of server and synchronization source files.
-# Listing them out manually instead of using wildcards prevents accidentally
-# pulling in unfinished modules or scratch files while building layer by layer.
+# Server translation units:
+# Listing files explicitly instead of using wildcards prevents accidentally
+# compiling unfinished scratch files while building the system layer by layer.
+# Notice the server links semaphore.c and shared_memory.c directly, while using
+# its own internal System V message-queue helpers inside server/server.c.
 SERVER_SRCS := \
 	server/main.c \
 	server/server.c \
@@ -28,38 +25,58 @@ SERVER_SRCS := \
 	server/transaction.c \
 	server/persistence.c \
 	server/operator.c \
-	synchronization/semaphore.c
+	synchronization/semaphore.c \
+	shared_memory/shared_memory.c
 
-# Swap every '.c' extension for '.o' so each object file lives right next
-# to its source file (e.g. server/main.c -> server/main.o).
+# Client translation units:
+# Notice how the client never compiles anything from server/ or synchronization/—
+# clients never acquire locks or touch server logic directly; they talk through
+# msg_queue.c and read snapshots through shared_memory.c.
+CLIENT_SRCS := \
+	client/main.c \
+	client/cli.c \
+	client/session.c \
+	msg_q/msg_queue.c \
+	shared_memory/shared_memory.c
+
+# Swap every '.c' extension for '.o' so each object file sits right next to its
+# source file (e.g. client/cli.c -> client/cli.o).
 SERVER_OBJS := $(SERVER_SRCS:.c=.o)
+CLIENT_OBJS := $(CLIENT_SRCS:.c=.o)
 
-# Final executable name dropped in the current directory
+# Output executables placed right in Lin/ipc/
 SERVER_BIN  := server_app
+CLIENT_BIN  := client_app
 
-# Mark non-file targets as .PHONY so commands like 'make clean' still execute
-# even if a file named 'clean' or 'server' ever ends up in this folder.
-.PHONY: all server clean
+# Declare non-file targets as .PHONY so commands like 'make clean' or 'make client'
+# always run even if a file with that exact name ever appears in this folder.
+.PHONY: all server client clean
 
-# Default target when running bare 'make'
-all: server
+# Default target when running bare 'make': builds both binaries together
+all: server client
 
-# Alias so 'make server' builds the server binary directly
+# Convenience aliases so 'make server' or 'make client' builds just one side
 server: $(SERVER_BIN)
 
-# Link step: bundles all compiled .o files into the final server_app binary.
-# '$@' expands to the target name (server_app).
+client: $(CLIENT_BIN)
+
+# Link the server executable ($@ expands to 'server_app')
 $(SERVER_BIN): $(SERVER_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(SERVER_OBJS) $(LDFLAGS)
 
-# Pattern rule: compiles each .c file into its matching .o file independently.
-# That way Make only recompiles the specific file you touched instead of
-# rebuilding the whole project every time.
-# '$<' is the .c source file, and '$@' is the output .o file.
+# Link the client executable ($@ expands to 'client_app')
+$(CLIENT_BIN): $(CLIENT_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(CLIENT_OBJS)
+
+# Pattern compilation rule: turns any foo.c into foo.o independently.
+# That way Make only recompiles the specific .c file you edited instead of
+# rebuilding both applications from scratch every time.
+#   '$<' expands to the first prerequisite (the .c source file)
+#   '$@' expands to the target (the .o object file)
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# Wipe all intermediate object files and the executable for a fresh build.
-# '-f' keeps rm from failing if the files were already deleted.
+# Remove all intermediate .o files and both executables for a clean rebuild.
+# '-f' keeps rm from failing with an error if some files are already gone.
 clean:
-	rm -f $(SERVER_OBJS) $(SERVER_BIN)
+	rm -f $(SERVER_OBJS) $(CLIENT_OBJS) $(SERVER_BIN) $(CLIENT_BIN)
