@@ -79,4 +79,6 @@ $(CLIENT_BIN): $(CLIENT_OBJS)
 # Remove all intermediate .o files and both executables for a clean rebuild.
 # '-f' keeps rm from failing with an error if some files are already gone.
 clean:
-	rm -f $(SERVER_OBJS) $(CLIENT_OBJS) $(SERVER_BIN) $(CLIENT_BIN)
+	find . -type f \( -name '*.o' -o -name '*.exe' -o -name '*.out' -o -name '*.save' \) -delete
+	rm -f $(SERVER_BIN) $(CLIENT_BIN)
+	rm -f utilities/*.dat utilities/*.dat.tmp utilities/*.tmp utilities/*.log utilities/*.key utilities/*.db
