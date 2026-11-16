@@ -1,0 +1,5 @@
+repeat,workers,iterations_per_worker,transactions,elapsed_ms,process_user_ms,process_kernel_ms,working_set_before_kb,working_set_after_kb,peak_working_set_kb,page_faults_before,page_faults_after,system_available_physical_kb
+1,1,1000,1000,879.462,31.250,421.875,2912,2920,2944,766,773,987752
+1,2,1000,2000,908.580,46.875,609.375,2912,3088,3128,766,820,989356
+1,4,1000,4000,1183.920,109.375,1140.625,2912,3216,3300,766,864,999820
+1,8,1000,8000,2223.620,328.125,2171.875,2912,3160,3304,765,866,1012044
