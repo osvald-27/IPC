@@ -1,510 +1,123 @@
+/*
+ * main.c (Windows Client Entry Point)
+ * Same flow as Linux. Only the Ctrl+C setup differs:
+ * SetConsoleCtrlHandler() instead of sigaction().
+ */
 
+#include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdint.h>
-#include <inttypes.h>
-#include <ctype.h>
+#include <windows.h>
 
 #include "../common/types.h"
-#include "../common/protocol.h"
 #include "../common/status.h"
-#include "../named_pipe/named_pipe.h"
 
-/* These definitions must match cli.c and session.c. */
+status_t    session_connect(const char *key_path);
+void        session_disconnect(void);
+int         session_is_logged_in(void);
+uint32_t    session_last_request_id(void);
+status_t    session_login(const char *client_id_str);
+status_t    session_logout(void);
+status_t    session_status_query(uint32_t request_id, status_t *out_txn_status,
+                                 money_t *out_balance, char *out_txn_id,
+                                 size_t txn_len);
+int         cli_run(volatile sig_atomic_t *stop_flag);
+const char *cli_status_text(status_t s);
 
-typedef enum cli_command_type {
-    CLI_BALANCE,
-    CLI_DEPOSIT,
-    CLI_WITHDRAW,
-    CLI_TRANSFER,
-    CLI_LOGOUT,
-    CLI_HELP,
-    CLI_INVALID
-} cli_command_type_t;
+static volatile sig_atomic_t g_stop = 0;
 
-typedef struct cli_command {
-    cli_command_type_t type;
-    client_id_t receiver_id;
-    money_t amount;
-} cli_command_t;
-
-typedef struct session {
-    client_id_t client_id;
-    session_id_t session_id;
-    int authenticated;
-} session_t;
-
-/* Functions implemented in cli.c. */
-int cli_read_command(cli_command_t *command);
-void cli_show_help(void);
-
-/* Functions implemented in session.c. */
-void session_init(session_t *session);
-int session_start(session_t *session,
-                  const client_id_t *client_id,
-                  const session_id_t *session_id);
-void session_end(session_t *session);
-int session_is_authenticated(const session_t *session);
-
-/* Generate a different request ID for each request. */
-static uint32_t request_sequence = 0;
-
-/*
- * Send a request and receive the server response.
- * The response payload is copied into response_data.
- */
-static status_t exchange_request(
-    named_pipe_t *pipe,
-    uint32_t message_type,
-    const session_id_t *session_id,
-    const void *request_payload,
-    uint32_t request_size,
-    response_t *server_response,
-    void *response_data,
-    uint32_t response_capacity,
-    uint32_t *response_data_size)
+/* Runs on its own thread; only set the flag. */
+static BOOL WINAPI on_ctrl(DWORD type)
 {
-    message_header_t request_header;
-    message_header_t response_header;
-    uint8_t received[MAX_PAYLOAD_SIZE];
-
-    status_t result;
-
-    if (pipe == NULL || server_response == NULL ||
-        response_data_size == NULL) {
-        return STATUS_INVALID_ARGUMENT;
+    if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT ||
+        type == CTRL_CLOSE_EVENT) {
+        g_stop = 1;
+        return TRUE;
     }
-
-    memset(&request_header, 0, sizeof(request_header));
-    memset(&response_header, 0, sizeof(response_header));
-
-    request_header.message_type = message_type;
-    request_header.payload_size = request_size;
-
-    request_sequence++;
-
-    snprintf(request_header.request_id.value,
-             sizeof(request_header.request_id.value),
-             "REQ-%08" PRIu32,
-             request_sequence);
-
-    if (session_id != NULL) {
-        request_header.session_id = *session_id;
-    }
-
-    result = pipe_send_message(
-        pipe,
-        &request_header,
-        request_payload
-    );
-
-    if (result != STATUS_OK) {
-        return result;
-    }
-
-    result = pipe_recv_message(
-        pipe,
-        &response_header,
-        received,
-        MAX_PAYLOAD_SIZE
-    );
-
-    if (result != STATUS_OK) {
-        return result;
-    }
-
-    if (response_header.message_type != RESPONSE_MESSAGE ||
-          strcmp(response_header.request_id.value,
-           request_header.request_id.value) != 0 ||
-        response_header.payload_size < sizeof(response_t) ||
-        response_header.payload_size > MAX_PAYLOAD_SIZE) {
-        return STATUS_ERROR;
-    }
-
-    memcpy(server_response, received, sizeof(response_t));
-
-    if (server_response->payload_size >
-        response_header.payload_size - sizeof(response_t)) {
-        return STATUS_ERROR;
-    }
-
-    if (server_response->payload_size > response_capacity) {
-        return STATUS_ERROR;
-    }
-
-    if (server_response->payload_size > 0U) {
-        if (response_data == NULL) {
-            return STATUS_INVALID_ARGUMENT;
-        }
-
-        memcpy(
-            response_data,
-            received + sizeof(response_t),
-            server_response->payload_size
-        );
-    }
-
-    *response_data_size = server_response->payload_size;
-
-    return STATUS_OK;
+    return FALSE;
 }
 
-/* Read and validate the client ID. */
-static int read_client_id(client_id_t *client_id)
+int main(int argc, char **argv)
 {
-    char input[64];
-    size_t length;
-    size_t i;
+    const char *account_arg = NULL;
+    char id_buf[32];
+    status_t st;
+    int i;
 
-    if (client_id == NULL) {
-        return 0;
-    }
-
-    printf("Enter your client ID: ");
-    fflush(stdout);
-
-    if (fgets(input, sizeof(input), stdin) == NULL) {
-        return 0;
-    }
-
-    if (strchr(input, '\n') == NULL && !feof(stdin)) {
-        int ch;
-
-        while ((ch = getchar()) != '\n' && ch != EOF) {
-        }
-
-        printf("Client ID is too long.\n");
-        return 0;
-    }
-
-    input[strcspn(input, "\r\n")] = '\0';
-    length = strlen(input);
-
-    if (length != CLIENT_ID_LENGTH) {
-        printf("Client ID must contain exactly %u characters.\n",
-               (unsigned int)CLIENT_ID_LENGTH);
-        return 0;
-    }
-
-    for (i = 0; i < length; i++) {
-        if (!isalnum((unsigned char)input[i])) {
-            printf("Client ID must contain only letters and numbers.\n");
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            printf("Usage: %s [ACCOUNT_ID]\n", argv[0]);
             return 0;
+        } else if (account_arg == NULL) {
+            account_arg = argv[i];
+        } else {
+            fprintf(stderr, "Unexpected argument '%s'.\n", argv[i]);
+            return 2;
         }
     }
 
-    memset(client_id, 0, sizeof(*client_id));
-    strcpy(client_id->value, input);
-
-    return 1;
-}
-
-/* Log in and obtain the session ID from the server. */
-static int client_login(
-    named_pipe_t *pipe,
-    session_t *session,
-    const client_id_t *client_id)
-{
-    login_request_t login_request;
-    session_id_t issued_session;
-    response_t response;
-    uint32_t response_size = 0;
-    status_t result;
-
-    memset(&login_request, 0, sizeof(login_request));
-    memset(&issued_session, 0, sizeof(issued_session));
-
-    login_request.client_id = *client_id;
-
-    result = exchange_request(
-        pipe,
-        REQUEST_LOGIN,
-        NULL,
-        &login_request,
-        sizeof(login_request),
-        &response,
-        &issued_session,
-        sizeof(issued_session),
-        &response_size
-    );
-
-    if (result != STATUS_OK) {
-        printf("Login communication failed. Status: %d\n", (int)result);
-        return 0;
-    }
-
-    if (response.status != STATUS_OK) {
-        printf("Login failed. Server status: %d\n",
-               (int)response.status);
-        return 0;
-    }
-
-    if (response_size != sizeof(session_id_t) ||
-        issued_session.value[0] == '\0') {
-        printf("Invalid login response from server.\n");
-        return 0;
-    }
-
-    if (!session_start(session, client_id, &issued_session)) {
-        printf("Could not establish client session.\n");
-        return 0;
-    }
-
-    printf("Login successful. Welcome, %s!\n", client_id->value);
-
-    return 1;
-}
-
-/* Request and display the account balance. */
-static void client_get_balance(
-    named_pipe_t *pipe,
-    const session_t *session)
-{
-    balance_request_t request;
-    balance_response_t balance;
-    response_t response;
-    uint32_t response_size = 0;
-    status_t result;
-
-    memset(&request, 0, sizeof(request));
-    memset(&balance, 0, sizeof(balance));
-
-    request.client_id = session->client_id;
-
-    result = exchange_request(
-        pipe,
-        REQUEST_GET_BALANCE,
-        &session->session_id,
-        &request,
-        sizeof(request),
-        &response,
-        &balance,
-        sizeof(balance),
-        &response_size
-    );
-
-    if (result != STATUS_OK) {
-        printf("Balance request failed. Communication status: %d\n",
-               (int)result);
-        return;
-    }
-
-    if (response.status != STATUS_OK) {
-        printf("Balance request rejected. Server status: %d\n",
-               (int)response.status);
-        return;
-    }
-
-    if (response_size != sizeof(balance_response_t)) {
-        printf("Invalid balance response from server.\n");
-        return;
-    }
-
-    printf("\nAccount: %s\n", balance.client_id.value);
-    printf("Balance: %" PRId64 " XAF\n", balance.balance);
-}
-
-/* Send a deposit, withdrawal, or transfer request. */
-static void client_transaction(
-    named_pipe_t *pipe,
-    const session_t *session,
-    const cli_command_t *command)
-{
-    transaction_request_t request;
-    transaction_response_t transaction_response;
-    response_t response;
-    uint32_t message_type;
-    uint32_t response_size = 0;
-    status_t result;
-
-    memset(&request, 0, sizeof(request));
-    memset(&transaction_response, 0, sizeof(transaction_response));
-
-    request.sender_id = session->client_id;
-    request.amount = command->amount;
-
-    switch (command->type) {
-        case CLI_DEPOSIT:
-            message_type = REQUEST_DEPOSIT;
-            request.type = TRANSACTION_DEPOSIT;
-            break;
-
-        case CLI_WITHDRAW:
-            message_type = REQUEST_WITHDRAWAL;
-            request.type = TRANSACTION_WITHDRAWAL;
-            break;
-
-        case CLI_TRANSFER:
-            message_type = REQUEST_TRANSFER;
-            request.type = TRANSACTION_TRANSFER;
-            request.receiver_id = command->receiver_id;
-            break;
-
-        default:
-            printf("Invalid transaction command.\n");
-            return;
-    }
-
-    result = exchange_request(
-        pipe,
-        message_type,
-        &session->session_id,
-        &request,
-        sizeof(request),
-        &response,
-        &transaction_response,
-        sizeof(transaction_response),
-        &response_size
-    );
-
-    if (result != STATUS_OK) {
-        printf("Transaction communication failed. Status: %d\n",
-               (int)result);
-        return;
-    }
-
-    if (response.status != STATUS_OK) {
-        printf("Transaction rejected. Server status: %d\n",
-               (int)response.status);
-        return;
-    }
-
-    if (response_size != sizeof(transaction_response_t)) {
-        printf("Invalid transaction response from server.\n");
-        return;
-    }
-
-    printf("\nTransaction response received.\n");
-    printf("Transaction status: %d\n",
-           (int)transaction_response.status);
-    printf("Transaction state: %d\n",
-           (int)transaction_response.state);
-    printf("Updated balance: %" PRId64 " XAF\n",
-           transaction_response.balance);
-}
-
-/* Send a logout request to the server. */
-static void client_logout(
-    named_pipe_t *pipe,
-    const session_t *session)
-{
-    response_t response;
-    uint32_t response_size = 0;
-    status_t result;
-
-    result = exchange_request(
-        pipe,
-        REQUEST_LOGOUT,
-        &session->session_id,
-        NULL,
-        0U,
-        &response,
-        NULL,
-        0U,
-        &response_size
-    );
-
-    if (result != STATUS_OK) {
-        printf("Logout communication failed. Status: %d\n",
-               (int)result);
-        return;
-    }
-
-    if (response.status == STATUS_OK) {
-        printf("Logout successful.\n");
-    } else {
-        printf("Logout failed. Server status: %d\n",
-               (int)response.status);
-    }
-}
-
-int main(void)
-{
-    named_pipe_t *pipe = NULL;
-    session_t session;
-    client_id_t client_id;
-    cli_command_t command;
-
-    status_t result;
-    int command_result;
-
-    session_init(&session);
-
-    printf("\nCrossIPC Windows Client\n");
-    printf("=======================\n");
-    printf("Connecting to server...\n");
-
-    result = pipe_client_open(PIPE_NAME, 5000U, &pipe);
-
-    if (result != STATUS_OK) {
-        fprintf(stderr,
-                "Connection failed. Status: %d\n",
-                (int)result);
+    if (!SetConsoleCtrlHandler(on_ctrl, TRUE)) {
+        fprintf(stderr, "SetConsoleCtrlHandler failed (error %lu)\n",
+                (unsigned long)GetLastError());
         return 1;
     }
 
-    printf("Connected to server successfully.\n");
+    printf("=====================================================\n");
+    printf("   CrossIPC Windows Banking Client (CEF427 Group 10)  \n");
+    printf("=====================================================\n");
 
-    if (!read_client_id(&client_id)) {
-        printf("Invalid client ID. Closing client.\n");
-        goto cleanup;
+    st = session_connect(NULL);
+    if (st != STATUS_OK) {
+        fprintf(stderr, "Connection failed: %s\n", cli_status_text(st));
+        return 1;
     }
 
-    if (!client_login(pipe, &session, &client_id)) {
-        goto cleanup;
+    if (account_arg != NULL) {
+        snprintf(id_buf, sizeof(id_buf), "%s", account_arg);
+    } else {
+        printf("Enter Account ID: ");
+        fflush(stdout);
+        if (fgets(id_buf, sizeof(id_buf), stdin) == NULL) {
+            session_disconnect();
+            return 1;
+        }
+        id_buf[strcspn(id_buf, "\r\n")] = '\0';
     }
 
-    printf("\nEnter 'help' to see available commands.\n");
+    st = session_login(id_buf);
+    if (st != STATUS_OK) {
+        fprintf(stderr, "Login failed for '%s': %s\n", id_buf,
+                cli_status_text(st));
+        session_disconnect();
+        return 1;
+    }
 
-    while (session_is_authenticated(&session)) {
+    cli_run(&g_stop);
 
-        command_result = cli_read_command(&command);
+    /* After Ctrl+C, check what happened to the last request. */
+    if (g_stop && session_is_logged_in()) {
+        uint32_t last_req = session_last_request_id();
+        printf("\n[CLIENT] Interrupt received. Checking last request...\n");
+        if (last_req > 0) {
+            status_t txn_st = STATUS_ERROR;
+            money_t bal = 0;
+            char txn_id[MAX_TRANSACTION_ID + 1U] = {0};
 
-        if (command_result == 0) {
-            printf("\nEnd of input.\n");
-            break;
-        }
-
-        if (command_result == -1) {
-            printf("Invalid command. Enter 'help' for assistance.\n");
-            continue;
-        }
-
-        switch (command.type) {
-
-            case CLI_HELP:
-                cli_show_help();
-                break;
-
-            case CLI_BALANCE:
-                client_get_balance(pipe, &session);
-                break;
-
-            case CLI_DEPOSIT:
-            case CLI_WITHDRAW:
-            case CLI_TRANSFER:
-                client_transaction(pipe, &session, &command);
-                break;
-
-            case CLI_LOGOUT:
-                client_logout(pipe, &session);
-                goto cleanup;
-
-            default:
-                printf("Unknown command.\n");
-                break;
+            if (session_status_query(last_req, &txn_st, &bal, txn_id,
+                                     sizeof(txn_id)) == STATUS_OK) {
+                printf("[CLIENT] Last request #%u (Txn: %s): %s\n",
+                       last_req, txn_id[0] ? txn_id : "-",
+                       cli_status_text(txn_st));
+            }
         }
     }
 
-cleanup:
-    session_end(&session);
-
-    if (pipe != NULL) {
-        pipe_close(pipe);
-        pipe = NULL;
+    if (session_is_logged_in()) {
+        session_logout();
     }
+    session_disconnect();
 
-    printf("Connection closed.\n");
-
+    printf("Disconnected cleanly.\n");
     return 0;
 }
