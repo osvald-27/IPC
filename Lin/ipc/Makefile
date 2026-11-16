@@ -47,10 +47,22 @@ CLIENT_OBJS := $(CLIENT_SRCS:.c=.o)
 # Output executables placed right in Lin/ipc/
 SERVER_BIN  := server_app
 CLIENT_BIN  := client_app
+TEST_BIN    := tests/transaction_stress_test
+
+TEST_SRCS := \
+	tests/transaction_stress_test.c \
+	server/transaction.c \
+	server/client_registry.c \
+	server/persistence.c \
+	server/authentication.c \
+	server/server.c \
+	msg_q/msg_queue.c \
+	synchronization/semaphore.c \
+	shared_memory/shared_memory.c
 
 # Declare non-file targets as .PHONY so commands like 'make clean' or 'make client'
 # always run even if a file with that exact name ever appears in this folder.
-.PHONY: all server client clean
+.PHONY: all server client test bench clean
 
 # Default target when running bare 'make': builds both binaries together
 all: server client
@@ -59,6 +71,15 @@ all: server client
 server: $(SERVER_BIN)
 
 client: $(CLIENT_BIN)
+
+test: $(TEST_BIN)
+	./$(TEST_BIN)
+
+bench: $(TEST_BIN)
+	sh ./tests/run_measurements.sh
+
+$(TEST_BIN): $(TEST_SRCS)
+	$(CC) $(CFLAGS) -o $@ $(TEST_SRCS) $(LDFLAGS)
 
 # Link the server executable ($@ expands to 'server_app')
 $(SERVER_BIN): $(SERVER_OBJS)
@@ -80,5 +101,5 @@ $(CLIENT_BIN): $(CLIENT_OBJS)
 # '-f' keeps rm from failing with an error if some files are already gone.
 clean:
 	find . -type f \( -name '*.o' -o -name '*.exe' -o -name '*.out' -o -name '*.save' \) -delete
-	rm -f $(SERVER_BIN) $(CLIENT_BIN)
+	rm -f $(SERVER_BIN) $(CLIENT_BIN) $(TEST_BIN)
 	rm -f utilities/*.dat utilities/*.dat.tmp utilities/*.tmp utilities/*.log utilities/*.key utilities/*.db

@@ -13,7 +13,7 @@
  *   (or intentionally skip locking when running --nolock race condition tests).
  */
 
-#include server.h
+#include "server.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -33,7 +33,7 @@ void registry_make_id(client_id_t *id, unsigned index) {
     }
 
     memset(id, 0, sizeof(*id));
-    snprintf(id->value, sizeof(id->value), ACC%04u, index + 1U);
+    snprintf(id->value, sizeof(id->value), "ACC%04u", index + 1U);
 }
 
 /*
@@ -87,7 +87,7 @@ account_t *registry_find(bank_t *bank, const client_id_t *id) {
 }
 
 /*
- * Sanity-checks a bank_t image right after loading it from utilitiesank.dat.
+ * Sanity-checks a bank_t image right after loading it from utilities\bank.dat.
  *
  * Because persistence_load() reads raw bytes straight off disk into shared
  * memory, a truncated write, bit flip, or schema change (like altering
@@ -155,4 +155,3 @@ int registry_consistent(const bank_t *bank, money_t *actual, money_t *expected) 
 
     return sum == want;
 }
-
