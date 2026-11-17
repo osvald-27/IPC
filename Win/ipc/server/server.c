@@ -1,188 +1,269 @@
 #include "server.h"
 
+#include "../named_pipe/named_pipe.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* Dispatches and executes an incoming client request */
-void server_handle_request(server_ctx_t *ctx, session_t *session, const Message *request, Message *response) {
+static void copy_field(char *destination, size_t capacity, const char *source)
+{
+    if (destination == NULL || capacity == 0U) {
+        return;
+    }
+
+    if (source == NULL) {
+        destination[0] = '\0';
+        return;
+    }
+
+    strncpy(destination, source, capacity - 1U);
+    destination[capacity - 1U] = '\0';
+}
+
+void server_handle_request(
+    server_ctx_t *ctx,
+    session_t *session,
+    const Message *request,
+    Message *response
+)
+{
+    status_t status;
+
+    if (ctx == NULL || session == NULL || request == NULL || response == NULL) {
+        return;
+    }
+
     memset(response, 0, sizeof(*response));
     response->request_id = request->request_id;
-    response->sender_pid = (uint32_t)GetCurrentProcessId();
+    response->sender_pid = GetCurrentProcessId();
     response->operation = request->operation;
-    strncpy(response->client_id, request->client_id, CLIENT_ID_LEN - 1);
-    strncpy(response->session_id, session->session_id.value, SESSION_ID_LEN - 1);
 
-    /* 1. Login Request */
+    copy_field(response->client_id, sizeof(response->client_id), request->client_id);
+
     if (request->operation == MSG_LOGIN) {
-        status_t st = auth_login(ctx, session, request->client_id, request->sender_pid);
-        response->status_code = st;
-        if (st == STATUS_OK) {
-            strncpy(response->session_id, session->session_id.value, SESSION_ID_LEN - 1);
-        }
-        return;
-    }
-
-    /* 2. For all subsequent requests, verify session token */
-    status_t auth_st = auth_check(session, request->client_id, request->session_id);
-    if (auth_st != STATUS_OK) {
-        response->status_code = auth_st;
-        return;
-    }
-
-    /* 3. Handle Authenticated Operations */
-    switch (request->operation) {
-    case MSG_BALANCE: {
-        balance_response_t bal;
-        client_id_t cid;
-        memset(&cid, 0, sizeof(cid));
-        strncpy(cid.value, session->client_id.value, CLIENT_ID_LENGTH);
-
-        status_t st = transaction_balance(ctx, &cid, &bal);
-        response->status_code = st;
-        if (st == STATUS_OK) {
-            response->amount = bal.balance;
-        }
-        break;
-    }
-
-    case MSG_DEPOSIT:
-    case MSG_WITHDRAW:
-    case MSG_TRANSFER: {
-        /* Clients can only operate or initiate debit on their own authenticated account */
-        if (strncmp(request->client_id, session->client_id.value, CLIENT_ID_LENGTH) != 0) {
-            response->status_code = STATUS_PERMISSION_DENIED;
-            break;
-        }
-        transaction_execute(ctx, request, response);
-        break;
-    }
-
-    case MSG_STATUS_QUERY: {
-        transaction_status_query(ctx, request->request_id, response);
-        break;
-    }
-
-    case MSG_SERVER_STATUS: {
-        int consistent = 0;
-        if (ctx->use_lock && semaphore_lock(ctx->lock) != STATUS_OK) {
-            response->status_code = STATUS_SYNCHRONIZATION_ERROR;
-            break;
-        }
-        consistent = registry_consistent(ctx->bank, NULL, NULL);
-        if (ctx->use_lock) {
-            semaphore_unlock(ctx->lock);
-        }
-        response->status_code = consistent ? STATUS_OK : STATUS_INTERNAL_ERROR;
-        break;
-    }
-
-    case MSG_LOGOUT: {
-        auth_logout(session);
-        response->status_code = STATUS_OK;
-        break;
-    }
-
-    default:
-        response->status_code = STATUS_INVALID_ARGUMENT;
-        break;
-    }
-}
-
-/* Helper to guarantee reading an exact Message struct from the Named Pipe */
-static int pipe_read_exact(HANDLE pipe, void *buf, DWORD len) {
-    DWORD total = 0;
-    char *ptr = (char *)buf;
-    while (total < len) {
-        DWORD read_now = 0;
-        if (!ReadFile(pipe, ptr + total, len - total, &read_now, NULL) || read_now == 0) {
-            return -1;
-        }
-        total += read_now;
-    }
-    return 0;
-}
-
-/* Helper to guarantee writing an exact Message struct to the Named Pipe */
-static int pipe_write_exact(HANDLE pipe, const void *buf, DWORD len) {
-    DWORD total = 0;
-    const char *ptr = (const char *)buf;
-    while (total < len) {
-        DWORD written_now = 0;
-        if (!WriteFile(pipe, ptr + total, len - total, &written_now, NULL) || written_now == 0) {
-            return -1;
-        }
-        total += written_now;
-    }
-    FlushFileBuffers(pipe);
-    return 0;
-}
-
-/* Worker thread loop: accepts client pipe connections and serves requests */
-static DWORD WINAPI worker_thread_func(LPVOID arg) {
-    server_ctx_t *ctx = (server_ctx_t *)arg;
-
-    while (!ctx->stop) {
-        HANDLE pipe = CreateNamedPipeA(
-            PIPE_NAME,
-            PIPE_ACCESS_DUPLEX,
-            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
-            PIPE_UNLIMITED_INSTANCES,
-            sizeof(Message),
-            sizeof(Message),
-            0,
-            NULL
+        status = auth_login(
+            ctx,
+            session,
+            request->client_id,
+            request->sender_pid
         );
 
-        if (pipe == INVALID_HANDLE_VALUE) {
-            fprintf(stderr, "[WORKER %d] CreateNamedPipeA failed (error %lu)\n",
-                    ctx->worker_id, GetLastError());
+        response->status_code = status;
+
+        if (status == STATUS_OK) {
+            copy_field(
+                response->session_id,
+                sizeof(response->session_id),
+                session->session_id.value
+            );
+        }
+
+        return;
+    }
+
+    if (request->operation == MSG_ACCOUNT_CREATE) {
+        response->status_code = STATUS_ALREADY_EXISTS;
+        return;
+    }
+
+    status = auth_check(
+        session,
+        request->client_id,
+        request->session_id
+    );
+
+    if (status != STATUS_OK) {
+        response->status_code = status;
+        return;
+    }
+
+    switch (request->operation) {
+        case MSG_BALANCE:
+        {
+            balance_response_t balance;
+            client_id_t client_id;
+
+            memset(&client_id, 0, sizeof(client_id));
+            copy_field(
+                client_id.value,
+                sizeof(client_id.value),
+                session->client_id.value
+            );
+
+            status = transaction_balance(ctx, &client_id, &balance);
+            response->status_code = status;
+
+            if (status == STATUS_OK) {
+                response->amount = balance.balance;
+            }
+
+            break;
+        }
+
+        case MSG_DEPOSIT:
+        case MSG_WITHDRAW:
+        case MSG_TRANSFER:
+        {
+            if (strncmp(
+                    request->client_id,
+                    session->client_id.value,
+                    CLIENT_ID_LENGTH
+                ) != 0) {
+                response->status_code = STATUS_PERMISSION_DENIED;
+                break;
+            }
+
+            status = transaction_execute(ctx, request, response);
+            response->status_code = status;
+            break;
+        }
+
+        case MSG_STATUS_QUERY:
+        {
+            copy_field(
+                response->client_id,
+                sizeof(response->client_id),
+                session->client_id.value
+            );
+
+            status = transaction_status_query(
+                ctx,
+                request->request_id,
+                response
+            );
+
+            if (status == STATUS_OK) {
+                response->request_id = request->request_id;
+            }
+
+            break;
+        }
+
+        case MSG_SERVER_STATUS:
+        {
+            int consistent;
+
+            if (ctx->use_lock && semaphore_lock(ctx->lock) != STATUS_OK) {
+                response->status_code = STATUS_SYNCHRONIZATION_ERROR;
+                break;
+            }
+
+            consistent = registry_consistent(ctx->bank, NULL, NULL);
+
+            if (ctx->use_lock) {
+                semaphore_unlock(ctx->lock);
+            }
+
+            response->status_code = consistent
+                ? STATUS_OK
+                : STATUS_INTERNAL_ERROR;
+
+            break;
+        }
+
+        case MSG_LOGOUT:
+        {
+            auth_logout(session);
+            response->status_code = STATUS_OK;
+            break;
+        }
+
+        default:
+        {
+            response->status_code = STATUS_INVALID_ARGUMENT;
+            break;
+        }
+    }
+
+    if (session->logged_in) {
+        copy_field(
+            response->session_id,
+            sizeof(response->session_id),
+            session->session_id.value
+        );
+    }
+}
+
+static DWORD WINAPI worker_thread_func(LPVOID argument)
+{
+    server_ctx_t *ctx = (server_ctx_t *)argument;
+
+    if (ctx == NULL) {
+        return 1;
+    }
+
+    while (InterlockedCompareExchange(&ctx->stop, 0, 0) == 0) {
+        HANDLE pipe_handle = INVALID_HANDLE_VALUE;
+        session_t session;
+        status_t status;
+
+        memset(&session, 0, sizeof(session));
+
+        status = named_pipe_server_create(&pipe_handle);
+
+        if (status != STATUS_OK) {
             Sleep(100);
             continue;
         }
 
-        BOOL connected = ConnectNamedPipe(pipe, NULL) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
-        if (!connected || ctx->stop) {
-            CloseHandle(pipe);
+        status = named_pipe_server_accept(pipe_handle);
+
+        if (status != STATUS_OK) {
+            named_pipe_server_disconnect(pipe_handle);
+            if (InterlockedCompareExchange(&ctx->stop, 0, 0) != 0) {
+                break;
+            }
             continue;
         }
 
-        session_t session;
-        memset(&session, 0, sizeof(session));
+        while (InterlockedCompareExchange(&ctx->stop, 0, 0) == 0) {
+            Message request;
+            Message response;
 
-        Message request;
-        Message response;
+            memset(&request, 0, sizeof(request));
+            memset(&response, 0, sizeof(response));
 
-        while (!ctx->stop) {
-            if (pipe_read_exact(pipe, &request, sizeof(Message)) != 0) {
-                break; /* Client disconnected or pipe closed */
+            status = named_pipe_read_exact(
+                pipe_handle,
+                &request,
+                sizeof(request)
+            );
+
+            if (status != STATUS_OK) {
+                break;
             }
 
-            server_handle_request(ctx, &session, &request, &response);
+            server_handle_request(
+                ctx,
+                &session,
+                &request,
+                &response
+            );
 
-            if (pipe_write_exact(pipe, &response, sizeof(Message)) != 0) {
+            status = named_pipe_write_exact(
+                pipe_handle,
+                &response,
+                sizeof(response)
+            );
+
+            if (status != STATUS_OK) {
                 break;
             }
         }
 
         auth_logout(&session);
-        DisconnectNamedPipe(pipe);
-        CloseHandle(pipe);
+        named_pipe_server_disconnect(pipe_handle);
     }
 
-    free(ctx);
     return 0;
 }
 
-int server_run(server_ctx_t *ctx) {
-    if (ctx == NULL) {
+int server_run(server_ctx_t *ctx)
+{
+    if (ctx == NULL || ctx->bank == NULL) {
         return 1;
     }
-    server_ctx_t *copy = malloc(sizeof(server_ctx_t));
-    if (copy == NULL) {
-        return 1;
-    }
-    *copy = *ctx;
-    worker_thread_func(copy);
-    return 0;
+
+    return (int)worker_thread_func(ctx);
 }
