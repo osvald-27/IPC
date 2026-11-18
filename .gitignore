@@ -1,0 +1,32 @@
+# Compiled object files and executables
+*.o
+*.obj
+*.exe
+*.out
+Lin/ipc/server_app
+Lin/ipc/client_app
+Win/ipc/server_app.exe
+Win/ipc/client_app.exe
+
+# Editor backup and temporary files
+*.save
+*.swp
+*.swo
+*~
+
+# Runtime databases, logs, and System V IPC key files
+utilities/*.dat
+utilities/*.dat.tmp
+utilities/*.tmp
+utilities/*.db
+utilities/*.log
+utilities/*.key
+bank.dat
+bank.dat.tmp
+transactions.log
+ipc.key
+
+# Keep environment templates or .gitkeep placeholders tracked
+!.gitkeep
+!.env
+!.gitignore
