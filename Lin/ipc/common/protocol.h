@@ -11,35 +11,6 @@
  * corrupted or unrelated bytes from the message queue
  * before parsing the rest of the packet.
  */
-#define PROTOCOL_NUMBER 0x43524950U
-#define PROTOCOL_VERSION        1U
-
-#define MAX_PAYLOAD_SIZE        4096U
-#define MAX_MESSAGE_SIZE        8192U
-
-/*
- * Operation codes should be spaced by tens (10s for queries, 20s for
- * money movements, etc.) so new commands can be added later
- * without shifting existing numbers.
- */
-typedef enum {
-    REQUEST_NONE               = 0,
-
-    REQUEST_INITIALIZE         = 1,
-    REQUEST_LOGIN              = 2,
-    REQUEST_LOGOUT             = 3
-#define PROTOCOL_H
-
-#include <stdint.h>
-
-#include "types.h"
-#include "status.h"
-#include "transaction.h"
-
-/* Number ("CRIP" in ASCII) lets the server quickly reject
- * corrupted or unrelated bytes from the message queue
- * before parsing the rest of the packet.
- */
 #define PROTOCOL_NUMBER	0x43524950U
 #define PROTOCOL_VERSION        1U
 

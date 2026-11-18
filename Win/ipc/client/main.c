@@ -1,123 +1,141 @@
+#include "client.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
 /*
- * main.c (Windows Client Entry Point)
- * Same flow as Linux. Only the Ctrl+C setup differs:
- * SetConsoleCtrlHandler() instead of sigaction().
+ * client.exe ACC0001                      interactive
+ * client.exe --auto ACC0001 COUNT SEED    one automatic client
+ * client.exe --spawn CLIENTS COUNT        start CLIENTS automatic clients with
+ *                                         CreateProcess() and measure throughput
  */
 
-#include <signal.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <string.h>
-#include <windows.h>
+#define MAX_SPAWN 64        /* WaitForMultipleObjects takes at most 64 handles */
 
-#include "../common/types.h"
-#include "../common/status.h"
+static HANDLE g_stop = NULL;
 
-status_t    session_connect(const char *key_path);
-void        session_disconnect(void);
-int         session_is_logged_in(void);
-uint32_t    session_last_request_id(void);
-status_t    session_login(const char *client_id_str);
-status_t    session_logout(void);
-status_t    session_status_query(uint32_t request_id, status_t *out_txn_status,
-                                 money_t *out_balance, char *out_txn_id,
-                                 size_t txn_len);
-int         cli_run(volatile sig_atomic_t *stop_flag);
-const char *cli_status_text(status_t s);
-
-static volatile sig_atomic_t g_stop = 0;
-
-/* Runs on its own thread; only set the flag. */
-static BOOL WINAPI on_ctrl(DWORD type)
-{
-    if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT ||
-        type == CTRL_CLOSE_EVENT) {
-        g_stop = 1;
+static BOOL WINAPI on_console_event(DWORD type) {
+    if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT || type == CTRL_CLOSE_EVENT) {
+        if (g_stop != NULL) {
+            SetEvent(g_stop);
+        }
         return TRUE;
     }
     return FALSE;
 }
 
-int main(int argc, char **argv)
-{
-    const char *account_arg = NULL;
-    char id_buf[32];
-    status_t st;
-    int i;
+static int spawn_clients(int clients, unsigned long count) {
+    char exe[MAX_PATH];
+    HANDLE procs[MAX_SPAWN];
+    LARGE_INTEGER freq, t0, t1;
+    int started = 0;
 
-    for (i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-            printf("Usage: %s [ACCOUNT_ID]\n", argv[0]);
-            return 0;
-        } else if (account_arg == NULL) {
-            account_arg = argv[i];
+    if (GetModuleFileNameA(NULL, exe, sizeof exe) == 0) {
+        fprintf(stderr, "GetModuleFileName failed: %lu\n", GetLastError());
+        return 1;
+    }
+
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&t0);
+
+    for (int i = 0; i < clients; i++) {
+        char command[MAX_PATH + 80];
+        STARTUPINFOA si;
+        PROCESS_INFORMATION pi;
+
+        /* clients are spread over the accounts, each with its own seed */
+        snprintf(command, sizeof command, "\"%s\" --auto ACC%04u %lu %d", exe,
+                 (unsigned)(i % (int)ACCOUNT_COUNT) + 1U, count, 1000 + i);
+
+        ZeroMemory(&si, sizeof si);
+        si.cb = sizeof si;
+        if (!CreateProcessA(NULL, command, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+            fprintf(stderr, "CreateProcess for client %d failed: %lu\n", i + 1, GetLastError());
+            break;
+        }
+        CloseHandle(pi.hThread);
+        procs[started++] = pi.hProcess;
+    }
+    if (started == 0) {
+        return 1;
+    }
+
+    /* wait for every child, the same job waitpid() does on Linux */
+    if (WaitForMultipleObjects((DWORD)started, procs, TRUE, INFINITE) == WAIT_FAILED) {
+        fprintf(stderr, "WaitForMultipleObjects failed: %lu\n", GetLastError());
+    }
+    QueryPerformanceCounter(&t1);
+
+    unsigned long committed = 0;
+    int failed = 0;
+    for (int i = 0; i < started; i++) {
+        DWORD code = 0;
+        if (!GetExitCodeProcess(procs[i], &code) || code == (DWORD)-1) {
+            failed++;
         } else {
-            fprintf(stderr, "Unexpected argument '%s'.\n", argv[i]);
-            return 2;
+            committed += code;      /* each client exits with its committed count */
         }
+        CloseHandle(procs[i]);
     }
 
-    if (!SetConsoleCtrlHandler(on_ctrl, TRUE)) {
-        fprintf(stderr, "SetConsoleCtrlHandler failed (error %lu)\n",
-                (unsigned long)GetLastError());
+    double seconds = (double)(t1.QuadPart - t0.QuadPart) / (double)freq.QuadPart;
+    double tps = seconds > 0.0 ? (double)committed / seconds : 0.0;
+
+    /* ask the server whether the totals still add up */
+    client_session_t s;
+    const char *check = "not checked";
+    if (session_open(&s, "ACC0001", g_stop) == STATUS_OK) {
+        check = session_server_check(&s) == STATUS_OK ? "consistent" : "NOT CONSISTENT";
+        session_close(&s);
+    }
+
+    printf("clients=%d sent=%lu committed=%lu seconds=%.3f tps=%.0f totals=%s",
+           started, count * (unsigned long)started, committed, seconds, tps, check);
+    if (failed > 0) {
+        printf(" failed_clients=%d", failed);
+    }
+    printf("\n");
+    /* one line a spreadsheet can read: clients,committed,seconds,tps */
+    fprintf(stderr, "CSV,%d,%lu,%.3f,%.0f\n", started, committed, seconds, tps);
+    return failed > 0 ? 1 : 0;
+}
+
+static int usage(void) {
+    fprintf(stderr, "usage: client ACCxxxx\n"
+                    "       client --auto ACCxxxx COUNT SEED\n"
+                    "       client --spawn CLIENTS COUNT\n");
+    return 2;
+}
+
+int main(int argc, char **argv) {
+    /* manual-reset, unnamed: only this process uses it */
+    g_stop = CreateEventA(NULL, TRUE, FALSE, NULL);
+    if (g_stop == NULL) {
+        fprintf(stderr, "CreateEvent failed: %lu\n", GetLastError());
         return 1;
     }
-
-    printf("=====================================================\n");
-    printf("   CrossIPC Windows Banking Client (CEF427 Group 10)  \n");
-    printf("=====================================================\n");
-
-    st = session_connect(NULL);
-    if (st != STATUS_OK) {
-        fprintf(stderr, "Connection failed: %s\n", cli_status_text(st));
-        return 1;
+    if (!SetConsoleCtrlHandler(on_console_event, TRUE)) {
+        fprintf(stderr, "SetConsoleCtrlHandler failed: %lu\n", GetLastError());
     }
 
-    if (account_arg != NULL) {
-        snprintf(id_buf, sizeof(id_buf), "%s", account_arg);
+    int code;
+    if (argc == 2 && argv[1][0] != '-') {
+        code = client_interactive(argv[1], g_stop);
+    } else if (argc == 5 && strcmp(argv[1], "--auto") == 0) {
+        code = client_auto(argv[2], strtoul(argv[3], NULL, 10), (unsigned)atoi(argv[4]), g_stop);
+    } else if (argc == 4 && strcmp(argv[1], "--spawn") == 0) {
+        int clients = atoi(argv[2]);
+        if (clients < 1 || clients > MAX_SPAWN) {
+            fprintf(stderr, "CLIENTS must be between 1 and %d\n", MAX_SPAWN);
+            code = 2;
+        } else {
+            code = spawn_clients(clients, strtoul(argv[3], NULL, 10));
+        }
     } else {
-        printf("Enter Account ID: ");
-        fflush(stdout);
-        if (fgets(id_buf, sizeof(id_buf), stdin) == NULL) {
-            session_disconnect();
-            return 1;
-        }
-        id_buf[strcspn(id_buf, "\r\n")] = '\0';
+        code = usage();
     }
 
-    st = session_login(id_buf);
-    if (st != STATUS_OK) {
-        fprintf(stderr, "Login failed for '%s': %s\n", id_buf,
-                cli_status_text(st));
-        session_disconnect();
-        return 1;
-    }
-
-    cli_run(&g_stop);
-
-    /* After Ctrl+C, check what happened to the last request. */
-    if (g_stop && session_is_logged_in()) {
-        uint32_t last_req = session_last_request_id();
-        printf("\n[CLIENT] Interrupt received. Checking last request...\n");
-        if (last_req > 0) {
-            status_t txn_st = STATUS_ERROR;
-            money_t bal = 0;
-            char txn_id[MAX_TRANSACTION_ID + 1U] = {0};
-
-            if (session_status_query(last_req, &txn_st, &bal, txn_id,
-                                     sizeof(txn_id)) == STATUS_OK) {
-                printf("[CLIENT] Last request #%u (Txn: %s): %s\n",
-                       last_req, txn_id[0] ? txn_id : "-",
-                       cli_status_text(txn_st));
-            }
-        }
-    }
-
-    if (session_is_logged_in()) {
-        session_logout();
-    }
-    session_disconnect();
-
-    printf("Disconnected cleanly.\n");
-    return 0;
+    CloseHandle(g_stop);
+    return code;
 }
