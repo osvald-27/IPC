@@ -1,66 +1,148 @@
 #include "server.h"
 
+#include <inttypes.h>
+#include <io.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
-/*
- * The bank is saved to DATA_FILE when the server shuts down and read
- * back at the next start, so balances survive a restart.
- * File layout: magic, account count, then the bank_t bytes.
- */
-
-#define DATA_FILE_TMP DATA_FILE ".tmp"
-
+/* File header for bank.dat */
 typedef struct {
     uint32_t magic;
     uint32_t account_count;
+    uint64_t saved_at;
 } file_header_t;
 
 status_t persistence_load(bank_t *bank) {
+    if (bank == NULL) {
+        return STATUS_INVALID_ARGUMENT;
+    }
+
     FILE *f = fopen(DATA_FILE, "rb");
     if (f == NULL) {
-        return STATUS_NOT_FOUND;        /* first run, nothing saved yet */
+        f = fopen("bank.dat", "rb");
+        if (f == NULL) {
+            return STATUS_NOT_FOUND;  /* First run, no saved state yet */
+        }
     }
 
     file_header_t header;
     bank_t loaded;
-    int ok = fread(&header, sizeof header, 1, f) == 1 &&
-             header.magic == PROTOCOL_NUMBER &&
-             header.account_count == ACCOUNT_COUNT &&
-             fread(&loaded, sizeof loaded, 1, f) == 1;
+
+    int ok = (fread(&header, sizeof(header), 1, f) == 1) &&
+             (header.magic == PROTOCOL_NUMBER) &&
+             (header.account_count == ACCOUNT_COUNT) &&
+             (fread(&loaded, sizeof(loaded), 1, f) == 1);
     fclose(f);
 
     if (!ok || !registry_valid(&loaded) || !registry_consistent(&loaded, NULL, NULL)) {
-        fprintf(stderr, "%s is damaged or from another version, ignoring it\n", DATA_FILE);
+        fprintf(stderr, "persistence_load: file damaged or incompatible, rejecting it\n");
         return STATUS_RECOVERY_ERROR;
     }
+
     *bank = loaded;
     return STATUS_OK;
 }
 
 status_t persistence_save(const bank_t *bank) {
-    /* write a temporary file first so a crash cannot leave half a file */
-    FILE *f = fopen(DATA_FILE_TMP, "wb");
-    if (f == NULL) {
-        perror("fopen " DATA_FILE_TMP);
-        return STATUS_STORAGE_ERROR;
+    if (bank == NULL) {
+        return STATUS_INVALID_ARGUMENT;
     }
 
-    file_header_t header = { PROTOCOL_NUMBER, ACCOUNT_COUNT };
-    int ok = fwrite(&header, sizeof header, 1, f) == 1 &&
-             fwrite(bank, sizeof *bank, 1, f) == 1;
+    const char *tmp_path = DATA_FILE_TMP;
+    const char *final_path = DATA_FILE;
+
+    FILE *f = fopen(tmp_path, "wb");
+    if (f == NULL) {
+        /* Fallback if utilities directory is inaccessible */
+        tmp_path = "bank.dat.tmp";
+        final_path = "bank.dat";
+        f = fopen(tmp_path, "wb");
+        if (f == NULL) {
+            perror("persistence_save: fopen tmp");
+            return STATUS_STORAGE_ERROR;
+        }
+    }
+
+    file_header_t header;
+    header.magic = PROTOCOL_NUMBER;
+    header.account_count = ACCOUNT_COUNT;
+    header.saved_at = (uint64_t)time(NULL);
+
+    int ok = (fwrite(&header, sizeof(header), 1, f) == 1) &&
+             (fwrite(bank, sizeof(*bank), 1, f) == 1);
+
+    if (fflush(f) != 0) {
+        ok = 0;
+    }
+    int fd = _fileno(f);
+    if (fd >= 0) {
+        _commit(fd);
+    }
     if (fclose(f) != 0) {
         ok = 0;
     }
+
     if (!ok) {
-        fprintf(stderr, "could not write %s\n", DATA_FILE_TMP);
-        DeleteFileA(DATA_FILE_TMP);
+        fprintf(stderr, "persistence_save: failed to write complete state\n");
+        _unlink(tmp_path);
         return STATUS_STORAGE_ERROR;
     }
 
-    if (!MoveFileExA(DATA_FILE_TMP, DATA_FILE, MOVEFILE_REPLACE_EXISTING)) {
-        fprintf(stderr, "MoveFileEx failed: %lu\n", GetLastError());
+    /*
+     * Unlike POSIX rename(), Windows rename() fails if final_path already
+     * exists, so we use MoveFileExA with MOVEFILE_REPLACE_EXISTING for an
+     * atomic overwrite.
+     */
+    if (!MoveFileExA(tmp_path, final_path, MOVEFILE_REPLACE_EXISTING)) {
+        fprintf(stderr, "persistence_save: MoveFileExA failed (error %lu)\n", GetLastError());
+        _unlink(tmp_path);
         return STATUS_STORAGE_ERROR;
     }
+
+    return STATUS_OK;
+}
+
+/* Write-Ahead Log: Appends every completed or rejected transaction to the log */
+status_t persistence_log_transaction(const transaction_t *tx) {
+    if (tx == NULL) {
+        return STATUS_INVALID_ARGUMENT;
+    }
+
+    const char *log_path = TRANSACTIONS_LOG;
+    FILE *f = fopen(log_path, "a");
+    if (f == NULL) {
+        log_path = "transactions.log";
+        f = fopen(log_path, "a");
+        if (f == NULL) {
+            return STATUS_STORAGE_ERROR;
+        }
+    }
+
+    const char *type_str = "UNKNOWN";
+    if (tx->type == TRANSACTION_DEPOSIT) type_str = "DEPOSIT";
+    else if (tx->type == TRANSACTION_WITHDRAWAL) type_str = "WITHDRAW";
+    else if (tx->type == TRANSACTION_TRANSFER) type_str = "TRANSFER";
+
+    const char *state_str = "UNKNOWN";
+    if (tx->state == TRANSACTION_COMMITTED) state_str = "COMMITTED";
+    else if (tx->state == TRANSACTION_REJECTED) state_str = "REJECTED";
+    else if (tx->state == TRANSACTION_FAILED) state_str = "FAILED";
+    else if (tx->state == TRANSACTION_PENDING) state_str = "PENDING";
+
+    fprintf(f, "%" PRIu64 " | TXN=%s | REQ=%s | TYPE=%s | SENDER=%s | RECV=%s | AMT=%" PRId64 " | STATE=%s | STATUS=%s (%d)\n",
+            tx->completed_at ? tx->completed_at : (uint64_t)time(NULL),
+            tx->transaction_id.value,
+            tx->request_id.value,
+            type_str,
+            tx->sender_id.value[0] ? tx->sender_id.value : "-",
+            tx->receiver_id.value[0] ? tx->receiver_id.value : "-",
+            tx->amount,
+            state_str,
+            server_status_string(tx->result),
+            tx->result);
+
+    fflush(f);
+    fclose(f);
     return STATUS_OK;
 }
