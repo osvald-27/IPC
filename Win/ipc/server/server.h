@@ -8,19 +8,19 @@
 #include <windows.h>
 #include <stdint.h>
 
-#include ../common/types.h
-#include ../common/status.h
-#include ../common/transaction.h
-#include ../common/protocol.h
-#include ../synchronization/semaphore.h
+#include "../common/types.h"
+#include "../common/status.h"
+#include "../common/transaction.h"
+#include "../common/protocol.h"
+#include "../synchronization/semaphore.h"
 
 /* Banking system parameters */
 /* Writing to a .tmp file first and renaming prevents corrupting bank.dat
  * if the server crashes or loses power mid-save.
  */
-#define DATA_FILE            utilitiesank.dat
-#define DATA_FILE_TMP        utilitiesank.dat.tmp
-#define TRANSACTIONS_LOG     utilities	ransactions.log
+#define DATA_FILE            "utilities\\bank.dat"
+#define DATA_FILE_TMP        "utilities\\bank.dat.tmp"
+#define TRANSACTIONS_LOG     "utilities\\transactions.log"
 
 #define DEFAULT_WORKERS      4
 #define MAX_WORKERS          32
@@ -151,42 +151,41 @@ int server_run(server_ctx_t *ctx);
  */
 static inline const char *server_status_string(status_t s) {
     switch (s) {
-        case STATUS_OK:                    return OK;
-        case STATUS_ERROR:                 return ERROR;
-        case STATUS_INVALID_ARGUMENT:      return INVALID_ARGUMENT;
-        case STATUS_OUT_OF_MEMORY:         return OUT_OF_MEMORY;
-        case STATUS_NOT_FOUND:             return NOT_FOUND;
-        case STATUS_ALREADY_EXISTS:        return ALREADY_EXISTS;
-        case STATUS_PERMISSION_DENIED:     return PERMISSION_DENIED;
-        case STATUS_AUTH_FAILED:           return AUTH_FAILED;
-        case STATUS_SESSION_INVALID:       return SESSION_INVALID;
-        case STATUS_SESSION_EXPIRED:       return SESSION_EXPIRED;
-        case STATUS_ACCOUNT_NOT_FOUND:     return ACCOUNT_NOT_FOUND;
-        case STATUS_ACCOUNT_EXISTS:        return ACCOUNT_EXISTS;
-        case STATUS_ACCOUNT_INACTIVE:      return ACCOUNT_INACTIVE;
-        case STATUS_INVALID_AMOUNT:        return INVALID_AMOUNT;
-        case STATUS_INSUFFICIENT_FUNDS:    return INSUFFICIENT_FUNDS;
-        case STATUS_TRANSACTION_REJECTED:  return TRANSACTION_REJECTED;
-        case STATUS_TRANSACTION_FAILED:    return TRANSACTION_FAILED;
-        case STATUS_TRANSACTION_PENDING:   return TRANSACTION_PENDING;
-        case STATUS_DUPLICATE_REQUEST:     return DUPLICATE_REQUEST;
-        case STATUS_SELF_TRANSFER:         return SELF_TRANSFER;
-        case STATUS_BALANCE_OVERFLOW:      return BALANCE_OVERFLOW;
-        case STATUS_QUEUE_ERROR:           return QUEUE_ERROR;
-        case STATUS_QUEUE_FULL:            return QUEUE_FULL;
-        case STATUS_QUEUE_EMPTY:           return QUEUE_EMPTY;
-        case STATUS_SHARED_MEMORY_ERROR:   return SHARED_MEMORY_ERROR;
-        case STATUS_SYNCHRONIZATION_ERROR: return SYNCHRONIZATION_ERROR;
-        case STATUS_TIMEOUT:               return TIMEOUT;
-        case STATUS_STORAGE_ERROR:         return STORAGE_ERROR;
-        case STATUS_RECOVERY_ERROR:        return RECOVERY_ERROR;
-        case STATUS_SERVER_UNAVAILABLE:    return SERVER_UNAVAILABLE;
-        case STATUS_SHUTTING_DOWN:         return SHUTTING_DOWN;
-        case STATUS_INTERRUPTED:           return INTERRUPTED;
-        case STATUS_INTERNAL_ERROR:        return INTERNAL_ERROR;
+        case STATUS_OK:                    return "OK";
+        case STATUS_ERROR:                 return "ERROR";
+        case STATUS_INVALID_ARGUMENT:      return "INVALID_ARGUMENT";
+        case STATUS_OUT_OF_MEMORY:         return "OUT_OF_MEMORY";
+        case STATUS_NOT_FOUND:             return "NOT_FOUND";
+        case STATUS_ALREADY_EXISTS:        return "ALREADY_EXISTS";
+        case STATUS_PERMISSION_DENIED:     return "PERMISSION_DENIED";
+        case STATUS_AUTH_FAILED:           return "AUTH_FAILED";
+        case STATUS_SESSION_INVALID:       return "SESSION_INVALID";
+        case STATUS_SESSION_EXPIRED:       return "SESSION_EXPIRED";
+        case STATUS_ACCOUNT_NOT_FOUND:     return "ACCOUNT_NOT_FOUND";
+        case STATUS_ACCOUNT_EXISTS:        return "ACCOUNT_EXISTS";
+        case STATUS_ACCOUNT_INACTIVE:      return "ACCOUNT_INACTIVE";
+        case STATUS_INVALID_AMOUNT:        return "INVALID_AMOUNT";
+        case STATUS_INSUFFICIENT_FUNDS:    return "INSUFFICIENT_FUNDS";
+        case STATUS_TRANSACTION_REJECTED:  return "TRANSACTION_REJECTED";
+        case STATUS_TRANSACTION_FAILED:    return "TRANSACTION_FAILED";
+        case STATUS_TRANSACTION_PENDING:   return "TRANSACTION_PENDING";
+        case STATUS_DUPLICATE_REQUEST:     return "DUPLICATE_REQUEST";
+        case STATUS_SELF_TRANSFER:         return "SELF_TRANSFER";
+        case STATUS_BALANCE_OVERFLOW:      return "BALANCE_OVERFLOW";
+        case STATUS_QUEUE_ERROR:           return "QUEUE_ERROR";
+        case STATUS_QUEUE_FULL:            return "QUEUE_FULL";
+        case STATUS_QUEUE_EMPTY:           return "QUEUE_EMPTY";
+        case STATUS_SHARED_MEMORY_ERROR:   return "SHARED_MEMORY_ERROR";
+        case STATUS_SYNCHRONIZATION_ERROR: return "SYNCHRONIZATION_ERROR";
+        case STATUS_TIMEOUT:               return "TIMEOUT";
+        case STATUS_STORAGE_ERROR:         return "STORAGE_ERROR";
+        case STATUS_RECOVERY_ERROR:        return "RECOVERY_ERROR";
+        case STATUS_SERVER_UNAVAILABLE:    return "SERVER_UNAVAILABLE";
+        case STATUS_SHUTTING_DOWN:         return "SHUTTING_DOWN";
+        case STATUS_INTERRUPTED:           return "INTERRUPTED";
+        case STATUS_INTERNAL_ERROR:        return "INTERNAL_ERROR";
     }
-    return UNKNOWN;
+    return "UNKNOWN";
 }
 
 #endif /* SERVER_H */
-
